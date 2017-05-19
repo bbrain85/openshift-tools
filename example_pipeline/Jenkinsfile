@@ -1,0 +1,121 @@
+node('maven') {
+  //def mvnHome = tool 'M3'
+  def mvnCmd = "mvn -s ./nexus_openshift_settings.xml"
+  def pom
+  def newTarget
+  def currentTarget
+  stage('Checkout Source') {
+
+    git url: 'http://jenkins:jenkins@gogs-user16-gogs.apps.advdev.openshift.opentlc.com/sal_incandela/openshift-tasks-private.git'
+
+
+    def buildName = "build-" + env.BUILD_NUMBER
+    sh "git checkout -b ${buildName}"
+    echo "Checkout"
+    sh 'mvn -s ./nexus_openshift_settings.xml build-helper:parse-version versions:set -DbuildNumber=$BUILD_NUMBER \'-DnewVersion=${parsedVersion.majorVersion}.${parsedVersion.minorVersion}.${buildNumber}\''
+    def commit = "Release " + env.BUILD_NUMBER
+    sh "git config --global user.email jenkins@redhat.com && git config --global user.name jenkins"
+    sh "git add --all && git commit -m \"${commit}\""
+    sh "git push origin ${buildName}"
+    
+
+  }
+
+  stage('Build war') {
+    sh "${mvnCmd} compile"
+  }
+
+  
+  stage('Unit Tests') {
+    sh "${mvnCmd} test"
+  }
+
+  
+  stage('Code Analysis') {
+    sh "${mvnCmd} sonar:sonar -DskipTests=true -Dsonar.host.url=http://sonarqube-user16-cicd.apps.advdev.openshift.opentlc.com/"
+  }
+  
+
+  stage('Publish to Nexus') {
+   sh "${mvnCmd} deploy -DskipTests=true"
+   pom = readMavenPom file: 'pom.xml'
+   echo "${pom}"
+   groupId = pom.groupId.replaceAll("\\.", "/")
+
+   git url: 'http://jenkins:jenkins@gogs-user16-gogs.apps.advdev.openshift.opentlc.com/sal_incandela/openshift-tasks-ocp'
+   sh "echo WAR_FILE_LOCATION=http://nexus3-user16-cicd.apps.advdev.openshift.opentlc.com/repository/maven-releases/${groupId}/${pom.artifactId}/${pom.version}/${pom.artifactId}-${pom.version}.war >.s2i/environment"
+   sh "echo BUILD_NUMBER=${BUILD_NUMBER} >>.s2i/environment"
+
+     // Update the Git/Gogs repository with the latest file
+     def commit = "Release " + pom.version
+     sh "git config --global user.email jenkins@redhat.com && git config --global user.name jenkins"
+     sh "git add .s2i/environment && git commit -m \"${commit}\""
+     sh "git push"
+   }     
+
+  // Build the OpenShift Image in OpenShift. Make sure to use the build configuration pointing to openshift-tasks-ocp
+  // for the .s2i/bin/assemble script to retrieve the war file from the location in the .s2i/environment file.
+  // Also tag the image with "TestingCandidate-${version}" - e.g. TestingCandidate-1.5
+  stage('Build OpenShift Image') {
+    openshiftBuild apiURL: '', authToken: '', bldCfg: 'tasks', buildName: '', checkForTriggeredDeployments: 'true', commitID: '', namespace: 'user16-tasks-dev', showBuildLogs: 'true', verbose: 'false', waitTime: '', waitUnit: 'sec'
+  }
+
+  // Deploy the built image to the Development Environment. Pay close attention to WHICH image you are deploying.
+  // Make sure it is the one you just tagged in the previous step. You may need to patch the deployment configuration
+  // of your application.
+  stage('Deploy to Dev') {
+    openshiftDeploy apiURL: '', authToken: '', depCfg: 'tasks', namespace: 'user16-tasks-dev', verbose: 'false', waitTime: '', waitUnit: 'sec'
+    openshiftTag alias: 'false', destStream: 'tasks', destTag: 'TestingCandidate-${BUILD_NUMBER}', destinationNamespace: 'user16-tasks-dev', namespace: 'user16-tasks-dev', srcStream: 'tasks', srcTag: 'latest', verbose: 'false'
+  }
+
+
+
+
+  // Run some integration tests (see the openshift-tasks Github Repository README.md for ideas).
+  // Once the tests succeed tag the image as ProdReady-${version}
+  stage('Integration Test') {
+    // TBD
+    openshiftTag alias: 'false', destStream: 'tasks', destTag: 'ProdReady-${BUILD_NUMBER}', destinationNamespace: 'user16-tasks-dev', namespace: 'user16-tasks-dev', srcStream: 'tasks', srcTag: 'latest', verbose: 'false'
+  }
+
+  // Blue/Green Deployment into Production
+  // -------------------------------------
+  // Next two stages could be one.
+  // Make sure to deploy the right version. If green is active then deploy blue, and vice versa.
+  // You will need to figure out which application is active and set the target to the other.
+  stage('Prep Production Deployment') {
+    // TBD
+    sh "oc project user16-tasks-prod"
+    sh "oc get route tasks-route -n user16-tasks-prod -o template --template='{{ .spec.to.name }}' > route-target"
+    newTarget = getNewTarget()
+    currentTarget = getCurrentTarget()
+  }
+
+  // Once approved (input step) switch production over to the new version.
+  stage('Switch over to new Version') {
+    input "Switch Production from ${currentTarget} to ${newTarget} ?" 
+    sh "ls -la"
+    sh "oc patch dc ${newTarget} --patch \'{\"spec\": { \"triggers\": [ { \"type\": \"ImageChange\", \"imageChangeParams\": { \"containerNames\": [ \"tasks\" ], \"from\": { \"kind\": \"ImageStreamTag\", \"namespace\": \"user16-tasks-dev\", \"name\": \"tasks:ProdReady-${BUILD_NUMBER}\"}}}]}}\' -n user16-tasks-prod"
+    //sh "oc patch -n user16-tasks-prod route/tasks-route --patch '{\"spec\":{\"to\":{\"name\":\"${newTarget}\"}}}'"
+    echo newTarget
+    openshiftDeploy depCfg: newTarget, namespace: 'user16-tasks-prod', verbose: 'false'
+  }
+}
+
+def getCurrentTarget() {
+  def currentTarget = readFile 'route-target'
+  return currentTarget
+}
+
+def getNewTarget() {
+  def currentTarget = getCurrentTarget()
+  def newTarget = ""
+  if (currentTarget == 'tasks-blue') {
+    newTarget = 'tasks-green'
+    } else if (currentTarget == 'tasks-green') {
+      newTarget = 'tasks-blue'
+      } else {
+        echo "OOPS, wrong target"
+      }
+      return newTarget
+    }
