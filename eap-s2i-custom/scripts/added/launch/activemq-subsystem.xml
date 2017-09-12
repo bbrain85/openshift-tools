@@ -22,6 +22,6 @@
         <jms-queue name="DLQ" entries="java:/jms/queue/DLQ"/>
         <!-- ##DESTINATIONS## -->
         <connection-factory name="InVmConnectionFactory" connectors="in-vm" entries="java:/ConnectionFactory"/>
-        <connection-factory name="RemoteConnectionFactory" ha="true" block-on-acknowledge="true" reconnect-attempts="-1" connectors="http-connector" entries="java:jboss/exported/jms/RemoteConnectionFactory"/>
+        <connection-factory name="RemoteConnectionFactory" ha="true" block-on-acknowledge="true" reconnect-attempts="5" connectors="http-connector" entries="java:jboss/exported/jms/RemoteConnectionFactory"/>
         <pooled-connection-factory name="activemq-ra" transaction="xa" connectors="in-vm" entries="java:/JmsXA java:jboss/DefaultJMSConnectionFactory"/>
     </server>
